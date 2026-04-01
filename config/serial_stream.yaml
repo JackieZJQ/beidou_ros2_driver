@@ -1,0 +1,4 @@
+YAML: 1.0
+
+device_name: /dev/beidou #串口名 
+baud_rate: 460800
