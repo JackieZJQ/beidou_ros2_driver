@@ -2,10 +2,12 @@
 
 #include <memory>
 #include <string>
+#include <deque>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
+#include <builtin_interfaces/msg/time.hpp>
 
 #include "parser/parser.h"
 #include "parser/novatel_messages.h"
@@ -30,11 +32,22 @@ private:
   void PublishNavsatfix(const MessagePtr message);
   void PublishCorrimu(const MessagePtr message);
 
+  rclcpp::Time ToRosTimeFromGpsTime(uint32_t gps_week, double gps_seconds);
+  void EstimateGpsUtcDiffSeconds(uint32_t gps_week, double gps_seconds);
+  void InitLeapSeconds(uint32_t gps_week, double gps_seconds);
+
 private:
   bool init_flag_ = false;
   std::unique_ptr<Parser> novatel_parser_;
 
-  double corrimudata_hz_ = 100.f; //imu输出频率
+  // corrimudata的频率，单位Hz
+  double corrimudata_hz_ = 100.f;
+
+  // GPS时间 转 UTC时间参数
+  double leap_seconds_ = 18.0;
+  bool leap_seconds_initialized_ = false;
+  size_t diff_window_size_ = 100;
+  std::deque<double> diff_window_;
 
   rclcpp::Node::SharedPtr node_;
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_publisher_;

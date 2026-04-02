@@ -5,6 +5,7 @@
 
 #include <Eigen/Geometry>
 #include <boost/array.hpp>
+#include <chrono>
 
 #include "parser/data_parser.h"
 
@@ -76,11 +77,60 @@ void DataParser::DispatchMessage(const MessageInfo& message_info) {
   }
 }
 
+rclcpp::Time DataParser::ToRosTimeFromGpsTime(uint32_t gps_week, double gps_seconds) {
+  // utc = gps + epoch_diff - leap_seconds
+  double unix_utc = static_cast<double>(gps_week) * 604800.0 + gps_seconds + 315964800.0 - static_cast<double>(leap_seconds_);
+
+  int64_t ns = static_cast<int64_t>(std::llround(unix_utc * 1e9));
+  return rclcpp::Time(ns, RCL_SYSTEM_TIME);
+}
+
+void DataParser::EstimateGpsUtcDiffSeconds(uint32_t gps_week, double gps_seconds) {
+
+  // gps -> utc (未减润秒)
+  const double gps_utc_like = static_cast<double>(gps_week) * 604800.0 + gps_seconds + 315964800.0;
+
+  // 系统UTC时间，已使用GPRMC消息同时
+  const double sys_utc = static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())*1e-9;
+
+  // diff = GPS-UTC + 链路延迟项
+  const double diff = gps_utc_like - sys_utc;
+
+  diff_window_.push_back(diff);
+  if (diff_window_.size() > diff_window_size_) diff_window_.pop_front();
+
+  // 样本足够后锁定整数 leap_seconds
+  if (!leap_seconds_initialized_ && diff_window_.size() >= 20) {
+
+    std::sort(diff_window_.begin(), diff_window_.end());
+    const size_t n = diff_window_.size();
+    const double med =  (n % 2 == 0) ? (diff_window_[n / 2 - 1] + diff_window_[n / 2]) / 2.0 : diff_window_[n / 2];
+
+    leap_seconds_ = static_cast<int>(std::llround(med)); // 你要的“直接取整”
+    leap_seconds_initialized_ = true;
+    std::cout << "[time_sync] lock leap_seconds=" << leap_seconds_
+              << " (median diff=" << med << "s)\n";
+  }
+
+  return;
+}
+
+void DataParser::InitLeapSeconds(uint32_t gps_week, double gps_seconds) {
+  if (leap_seconds_initialized_) return;
+
+  EstimateGpsUtcDiffSeconds(gps_week, gps_seconds);
+
+}
+
 void DataParser::PublishInspva(const MessagePtr message) {
   novatel::InsPva* pva = static_cast<novatel::InsPva*>(message);
   beidou_ins_driver::msg::Inspva msg;
-  //ros当前时间
-  msg.header.stamp = rclcpp::Clock().now();
+  
+  //estimateleapseconds
+  InitLeapSeconds(pva->gps_week, pva->gps_seconds);
+  if (!leap_seconds_initialized_) return;
+
+  msg.header.stamp = ToRosTimeFromGpsTime(pva->gps_week, pva->gps_seconds);
 
   //经纬高
   msg.latitude = pva->latitude;
@@ -100,8 +150,11 @@ void DataParser::PublishNavsatfix(const MessagePtr message) {
   novatel::InsPva *pva = static_cast<novatel::InsPva *>(message);
   sensor_msgs::msg::NavSatFix msg;
 
-  //ros当前时间
-  msg.header.stamp = rclcpp::Clock().now();
+  // utc时间
+  InitLeapSeconds(pva->gps_week, pva->gps_seconds);
+  if (!leap_seconds_initialized_) return;
+
+  msg.header.stamp = ToRosTimeFromGpsTime(pva->gps_week, pva->gps_seconds);
 
   //经纬高
   msg.latitude = pva->latitude;
@@ -122,7 +175,12 @@ void DataParser::PublishCorrimu(const MessagePtr message) {
   novatel::CorrImuData* imu  = static_cast<novatel::CorrImuData*>(message);
   sensor_msgs::msg::Imu msg;
 
-  msg.header.stamp = rclcpp::Clock().now(); //todo 转换为GPS时间，而不是解析消息的时间
+  // utc时间
+  InitLeapSeconds(imu->gps_week, imu->gps_seconds);
+  if (!leap_seconds_initialized_) return;
+
+  msg.header.stamp = ToRosTimeFromGpsTime(imu->gps_week, imu->gps_seconds);
+  
   msg.linear_acceleration.x = imu->y_velocity_change * corrimudata_hz_;
   msg.linear_acceleration.y = -imu->x_velocity_change * corrimudata_hz_;
   msg.linear_acceleration.z = imu->z_velocity_change * corrimudata_hz_;
